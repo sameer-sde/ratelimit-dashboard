@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 
 const API_BASE = 'http://localhost:8080';
@@ -11,19 +11,12 @@ const ALGO_LABELS = {
   swc:    'Sliding Window Counter',
   bucket: 'Token Bucket',
 };
-const ALGO_COLORS = {
-  fixed:  '#60a5fa',
-  slog:   '#34d399',
-  swc:    '#fbbf24',
-  bucket: '#f472b6',
-};
 
 export default function App() {
   const [metrics, setMetrics] = useState(null);
   const [history, setHistory] = useState([]);
   const [error, setError] = useState(null);
 
-  // Load test controls
   const [algorithm, setAlgorithm] = useState('fixed');
   const [requests, setRequests] = useState(1000);
   const [concurrency, setConcurrency] = useState(50);
@@ -31,77 +24,95 @@ export default function App() {
   const [window_, setWindow_] = useState(60);
   const [capacity, setCapacity] = useState(50);
   const [refill, setRefill] = useState(10);
-
   const [running, setRunning] = useState(false);
   const [lastResult, setLastResult] = useState(null);
 
-  useEffect(() => {
-    let prevAllowed = 0;
-    let prevDenied = 0;
-    let firstTick = true;
+  // Key inspector
+  const [inspectKey, setInspectKey] = useState('');
+  const [inspectData, setInspectData] = useState(null);
+  const [inspectError, setInspectError] = useState(null);
+  const [watching, setWatching] = useState(false);
+  const watchRef = useRef(null);
 
+  useEffect(() => {
+    let prevAllowed = 0, prevDenied = 0, firstTick = true;
     const tick = async () => {
       try {
         const res = await fetch(`${API_BASE}/metrics`);
         if (!res.ok) throw new Error(`status ${res.status}`);
         const data = await res.json();
-        setMetrics(data);
-        setError(null);
-
+        setMetrics(data); setError(null);
         if (!firstTick) {
-          const dAllowed = Math.max(0, data.allowed - prevAllowed);
-          const dDenied  = Math.max(0, data.denied - prevDenied);
           setHistory(h => [...h, {
             t: new Date().toLocaleTimeString(),
-            allowed: dAllowed,
-            denied: dDenied,
+            allowed: Math.max(0, data.allowed - prevAllowed),
+            denied:  Math.max(0, data.denied  - prevDenied),
           }].slice(-MAX_POINTS));
         }
         firstTick = false;
-        prevAllowed = data.allowed;
-        prevDenied  = data.denied;
+        prevAllowed = data.allowed; prevDenied = data.denied;
       } catch (e) { setError(e.message); }
     };
-
     tick();
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
   }, []);
 
   const runLoadTest = async () => {
-    setRunning(true);
-    setLastResult(null);
+    setRunning(true); setLastResult(null);
     try {
-      const body = {
-        algorithm,
-        requests: Number(requests),
-        concurrency: Number(concurrency),
-        key: `dashboard_loadtest_${algorithm}`,
-        limit: Number(limit),
-        window: Number(window_),
-        capacity: Number(capacity),
-        refill: Number(refill),
-      };
       const res = await fetch(`${API_BASE}/load-test`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body),
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          algorithm, requests: Number(requests), concurrency: Number(concurrency),
+          key: `dashboard_loadtest_${algorithm}`,
+          limit: Number(limit), window: Number(window_),
+          capacity: Number(capacity), refill: Number(refill),
+        }),
       });
+      setLastResult(await res.json());
+    } catch (e) { setLastResult({ error: e.message }); }
+    finally { setRunning(false); }
+  };
+
+  const fetchInspect = async (key) => {
+    if (!key) return;
+    try {
+      const res = await fetch(`${API_BASE}/inspect/${encodeURIComponent(key)}`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
       const data = await res.json();
-      setLastResult(data);
+      setInspectData(data); setInspectError(null);
     } catch (e) {
-      setLastResult({ error: e.message });
-    } finally {
-      setRunning(false);
+      setInspectError(e.message); setInspectData(null);
     }
   };
 
-  // Per-algorithm bar chart data
+  const toggleWatch = () => {
+    if (watching) {
+      clearInterval(watchRef.current);
+      watchRef.current = null;
+      setWatching(false);
+    } else {
+      if (!inspectKey) return;
+      fetchInspect(inspectKey);
+      watchRef.current = setInterval(() => fetchInspect(inspectKey), 1000);
+      setWatching(true);
+    }
+  };
+
+  // Stop watching if user changes the key
+  useEffect(() => {
+    if (watching) {
+      clearInterval(watchRef.current);
+      setWatching(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inspectKey]);
+
   const perAlgoData = metrics?.per_algorithm
     ? Object.entries(metrics.per_algorithm).map(([alg, s]) => ({
         algorithm: ALGO_LABELS[alg] || alg,
-        allowed: s.allowed,
-        denied: s.denied,
+        allowed: s.allowed, denied: s.denied,
       }))
     : [];
 
@@ -114,15 +125,13 @@ export default function App() {
 
       {error && <div style={styles.error}>⚠ Backend unreachable: {error}</div>}
 
-      {/* TOP-LEVEL KPIs */}
       <div style={styles.grid}>
-        <Kpi label="Total Requests"  value={metrics?.total_requests ?? '—'} accent="#60a5fa" />
-        <Kpi label="Allowed"         value={metrics?.allowed ?? '—'}         accent="#34d399" />
-        <Kpi label="Denied (429)"    value={metrics?.denied ?? '—'}          accent="#f87171" />
-        <Kpi label="Cache Hit Rate"  value={metrics ? `${metrics.cache_hit_rate.toFixed(1)}%` : '—'} accent="#fbbf24" />
+        <Kpi label="Total Requests" value={metrics?.total_requests ?? '—'} accent="#60a5fa" />
+        <Kpi label="Allowed"        value={metrics?.allowed ?? '—'}        accent="#34d399" />
+        <Kpi label="Denied (429)"   value={metrics?.denied ?? '—'}         accent="#f87171" />
+        <Kpi label="Cache Hit Rate" value={metrics ? `${metrics.cache_hit_rate.toFixed(1)}%` : '—'} accent="#fbbf24" />
       </div>
 
-      {/* LOAD TEST + CHART side by side */}
       <div style={styles.twoCol}>
         <div style={styles.card}>
           <div style={styles.cardTitle}>LOAD TEST</div>
@@ -135,12 +144,8 @@ export default function App() {
                 <option value="bucket">Token Bucket</option>
               </select>
             </Field>
-            <Field label="Requests">
-              <input type="number" value={requests} onChange={e=>setRequests(e.target.value)} style={styles.input} min="1" max="50000" />
-            </Field>
-            <Field label="Concurrency">
-              <input type="number" value={concurrency} onChange={e=>setConcurrency(e.target.value)} style={styles.input} min="1" max="200" />
-            </Field>
+            <Field label="Requests"><input type="number" value={requests} onChange={e=>setRequests(e.target.value)} style={styles.input} min="1" max="50000" /></Field>
+            <Field label="Concurrency"><input type="number" value={concurrency} onChange={e=>setConcurrency(e.target.value)} style={styles.input} min="1" max="200" /></Field>
             {algorithm === 'bucket' ? (
               <>
                 <Field label="Capacity"><input type="number" value={capacity} onChange={e=>setCapacity(e.target.value)} style={styles.input} /></Field>
@@ -153,24 +158,16 @@ export default function App() {
               </>
             )}
           </div>
-          <button onClick={runLoadTest} disabled={running} style={styles.button}>
-            {running ? 'RUNNING…' : '▶ RUN TEST'}
-          </button>
-
+          <button onClick={runLoadTest} disabled={running} style={styles.button}>{running ? 'RUNNING…' : '▶ RUN TEST'}</button>
           {lastResult && (
             <div style={styles.resultBox}>
-              {lastResult.error ? (
-                <div style={{color:'#f87171'}}>Error: {lastResult.error}</div>
-              ) : (
-                <>
-                  <ResultRow label="Sent"     value={lastResult.sent} />
-                  <ResultRow label="Allowed"  value={lastResult.allowed} color="#34d399" />
-                  <ResultRow label="Denied"   value={lastResult.denied}  color="#f87171" />
-                  <ResultRow label="Errors"   value={lastResult.errors} />
-                  <ResultRow label="Duration" value={`${lastResult.duration_ms} ms`} />
-                  <ResultRow label="RPS"      value={lastResult.rps.toFixed(0)} color="#fbbf24" big />
-                </>
-              )}
+              {lastResult.error ? (<div style={{color:'#f87171'}}>Error: {lastResult.error}</div>) : (<>
+                <ResultRow label="Sent"     value={lastResult.sent} />
+                <ResultRow label="Allowed"  value={lastResult.allowed} color="#34d399" />
+                <ResultRow label="Denied"   value={lastResult.denied}  color="#f87171" />
+                <ResultRow label="Duration" value={`${lastResult.duration_ms} ms`} />
+                <ResultRow label="RPS"      value={lastResult.rps.toFixed(0)} color="#fbbf24" big />
+              </>)}
             </div>
           )}
         </div>
@@ -190,7 +187,62 @@ export default function App() {
         </div>
       </div>
 
-      {/* PER-ALGORITHM BREAKDOWN */}
+      {/* KEY INSPECTOR */}
+      <div style={{...styles.card, marginTop: 16}}>
+        <div style={styles.cardTitle}>KEY INSPECTOR</div>
+        <div style={{display: 'flex', gap: 8, marginBottom: 12}}>
+          <input
+            type="text"
+            value={inspectKey}
+            onChange={e=>setInspectKey(e.target.value)}
+            placeholder="e.g. user_42  or  dashboard_loadtest_fixed"
+            style={{...styles.input, flex: 1}}
+            onKeyDown={e => e.key === 'Enter' && fetchInspect(inspectKey)}
+          />
+          <button onClick={() => fetchInspect(inspectKey)} style={{...styles.button, width: 120}}>INSPECT</button>
+          <button onClick={toggleWatch} style={{...styles.button, width: 140, background: watching ? '#7f1d1d' : '#0e7490'}} disabled={!inspectKey}>
+            {watching ? '⏸ STOP WATCH' : '⟳ WATCH'}
+          </button>
+        </div>
+        {inspectError && <div style={styles.error}>⚠ {inspectError}</div>}
+        {inspectData && (
+          <div style={styles.inspectGrid}>
+            <InspectCard title="Fixed Window" data={inspectData.fixed} render={f => (
+              <>
+                <Row k="Redis Key" v={f.redis_key} mono />
+                <Row k="Count" v={f.count} highlight />
+                <Row k="TTL" v={`${f.ttl_seconds}s`} />
+              </>
+            )} />
+            <InspectCard title="Sliding Window Log" data={inspectData.slog} render={s => (
+              <>
+                <Row k="Redis Key" v={s.redis_key} mono />
+                <Row k="Count" v={s.count} highlight />
+                <Row k="TTL" v={`${s.ttl_seconds}s`} />
+                <Row k="Recent" v={`${s.recent?.length || 0} entries`} />
+                {s.recent && s.recent.slice(-3).map((e, i) => (
+                  <Row key={i} k={`  · req`} v={e.req_id?.slice(0, 24) || '—'} mono small />
+                ))}
+              </>
+            )} />
+            <InspectCard title="Sliding Window Counter" data={inspectData.swc} render={s => (
+              <>
+                {s.current && <Row k={`Cur bucket #${s.current.bucket_id}`} v={s.current.count} highlight />}
+                {s.previous && <Row k={`Prev bucket #${s.previous.bucket_id}`} v={s.previous.count} />}
+                {!s.current && !s.previous && <Row k="" v="(no active buckets)" />}
+              </>
+            )} />
+            <InspectCard title="Token Bucket" data={inspectData.token_bucket} render={t => (
+              <>
+                <Row k="Redis Key" v={t.redis_key} mono />
+                <Row k="Tokens" v={t.tokens.toFixed(2)} highlight />
+                <Row k="TTL" v={`${t.ttl_seconds}s`} />
+              </>
+            )} />
+          </div>
+        )}
+      </div>
+
       {perAlgoData.length > 0 && (
         <div style={{...styles.card, marginTop: 16}}>
           <div style={styles.cardTitle}>ALGORITHM COMPARISON</div>
@@ -216,33 +268,35 @@ export default function App() {
 }
 
 function Kpi({ label, value, accent }) {
+  return (<div style={styles.kpi}><div style={{...styles.kpiLabel, color: accent}}>{label}</div><div style={styles.kpiValue}>{value}</div></div>);
+}
+function Field({ label, children }) {
+  return (<label style={styles.field}><div style={styles.fieldLabel}>{label}</div>{children}</label>);
+}
+function ResultRow({ label, value, color, big }) {
+  return (<div style={styles.resultRow}><span style={styles.resultLabel}>{label}</span><span style={{...styles.resultValue, color: color || '#e5e7eb', fontSize: big ? 22 : 14, fontWeight: big ? 700 : 500}}>{value}</span></div>);
+}
+function InspectCard({ title, data, render }) {
   return (
-    <div style={styles.kpi}>
-      <div style={{ ...styles.kpiLabel, color: accent }}>{label}</div>
-      <div style={styles.kpiValue}>{value}</div>
+    <div style={styles.inspectCard}>
+      <div style={styles.inspectTitle}>{title}</div>
+      {data ? render(data) : <div style={{fontSize: 12, color: '#6b7280', fontStyle: 'italic'}}>no state</div>}
     </div>
   );
 }
-
-function Field({ label, children }) {
+function Row({ k, v, mono, highlight, small }) {
   return (
-    <label style={styles.field}>
-      <div style={styles.fieldLabel}>{label}</div>
-      {children}
-    </label>
-  );
-}
-
-function ResultRow({ label, value, color, big }) {
-  return (
-    <div style={styles.resultRow}>
-      <span style={styles.resultLabel}>{label}</span>
+    <div style={{display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: small ? 10 : 12}}>
+      <span style={{color: '#9ca3af'}}>{k}</span>
       <span style={{
-        ...styles.resultValue,
-        color: color || '#e5e7eb',
-        fontSize: big ? 22 : 14,
-        fontWeight: big ? 700 : 500,
-      }}>{value}</span>
+        color: highlight ? '#fbbf24' : '#e5e7eb',
+        fontFamily: mono ? 'ui-monospace, monospace' : 'inherit',
+        fontWeight: highlight ? 600 : 400,
+        maxWidth: '60%',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}>{v}</span>
     </div>
   );
 }
@@ -263,11 +317,14 @@ const styles = {
   field: { display: 'block' },
   fieldLabel: { fontSize: 10, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
   input: { width: '100%', background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6, color: '#e5e7eb', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit' },
-  button: { width: '100%', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, padding: '10px', fontSize: 13, fontWeight: 600, letterSpacing: 1, cursor: 'pointer' },
+  button: { background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, padding: '10px', fontSize: 13, fontWeight: 600, letterSpacing: 1, cursor: 'pointer' },
   resultBox: { marginTop: 16, padding: 12, background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6 },
   resultRow: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #1f2937' },
   resultLabel: { fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1 },
   resultValue: { fontSize: 14, fontWeight: 500 },
+  inspectGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 },
+  inspectCard: { background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6, padding: 12 },
+  inspectTitle: { fontSize: 11, color: '#60a5fa', letterSpacing: 1, marginBottom: 10, fontWeight: 600, textTransform: 'uppercase' },
   footer: { marginTop: 24, fontSize: 11, color: '#6b7280', textAlign: 'center' },
   error: { background: '#7f1d1d', color: '#fecaca', padding: 12, borderRadius: 6, marginBottom: 16, fontSize: 13 },
 };
