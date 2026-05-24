@@ -1,17 +1,41 @@
 import { useEffect, useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
 
 const API_BASE = 'http://localhost:8080';
 const POLL_MS = 1000;
-const MAX_POINTS = 60; // last 60 seconds
+const MAX_POINTS = 60;
+
+const ALGO_LABELS = {
+  fixed:  'Fixed Window',
+  slog:   'Sliding Window Log',
+  swc:    'Sliding Window Counter',
+  bucket: 'Token Bucket',
+};
+const ALGO_COLORS = {
+  fixed:  '#60a5fa',
+  slog:   '#34d399',
+  swc:    '#fbbf24',
+  bucket: '#f472b6',
+};
 
 export default function App() {
   const [metrics, setMetrics] = useState(null);
   const [history, setHistory] = useState([]);
   const [error, setError] = useState(null);
 
+  // Load test controls
+  const [algorithm, setAlgorithm] = useState('fixed');
+  const [requests, setRequests] = useState(1000);
+  const [concurrency, setConcurrency] = useState(50);
+  const [limit, setLimit] = useState(100);
+  const [window_, setWindow_] = useState(60);
+  const [capacity, setCapacity] = useState(50);
+  const [refill, setRefill] = useState(10);
+
+  const [running, setRunning] = useState(false);
+  const [lastResult, setLastResult] = useState(null);
+
   useEffect(() => {
-    let prevTotal = 0;
     let prevAllowed = 0;
     let prevDenied = 0;
     let firstTick = true;
@@ -26,28 +50,60 @@ export default function App() {
 
         if (!firstTick) {
           const dAllowed = Math.max(0, data.allowed - prevAllowed);
-          const dDenied = Math.max(0, data.denied - prevDenied);
-          const point = {
+          const dDenied  = Math.max(0, data.denied - prevDenied);
+          setHistory(h => [...h, {
             t: new Date().toLocaleTimeString(),
             allowed: dAllowed,
             denied: dDenied,
-          };
-          setHistory(h => [...h, point].slice(-MAX_POINTS));
+          }].slice(-MAX_POINTS));
         }
         firstTick = false;
-
-        prevTotal = data.total_requests;
         prevAllowed = data.allowed;
-        prevDenied = data.denied;
-      } catch (e) {
-        setError(e.message);
-      }
+        prevDenied  = data.denied;
+      } catch (e) { setError(e.message); }
     };
 
     tick();
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
   }, []);
+
+  const runLoadTest = async () => {
+    setRunning(true);
+    setLastResult(null);
+    try {
+      const body = {
+        algorithm,
+        requests: Number(requests),
+        concurrency: Number(concurrency),
+        key: `dashboard_loadtest_${algorithm}`,
+        limit: Number(limit),
+        window: Number(window_),
+        capacity: Number(capacity),
+        refill: Number(refill),
+      };
+      const res = await fetch(`${API_BASE}/load-test`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      setLastResult(data);
+    } catch (e) {
+      setLastResult({ error: e.message });
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  // Per-algorithm bar chart data
+  const perAlgoData = metrics?.per_algorithm
+    ? Object.entries(metrics.per_algorithm).map(([alg, s]) => ({
+        algorithm: ALGO_LABELS[alg] || alg,
+        allowed: s.allowed,
+        denied: s.denied,
+      }))
+    : [];
 
   return (
     <div style={styles.page}>
@@ -58,33 +114,99 @@ export default function App() {
 
       {error && <div style={styles.error}>⚠ Backend unreachable: {error}</div>}
 
+      {/* TOP-LEVEL KPIs */}
       <div style={styles.grid}>
-        <Kpi label="Total Requests" value={metrics?.total_requests ?? '—'} accent="#60a5fa" />
-        <Kpi label="Allowed" value={metrics?.allowed ?? '—'} accent="#34d399" />
-        <Kpi label="Denied (429)" value={metrics?.denied ?? '—'} accent="#f87171" />
-        <Kpi
-          label="Cache Hit Rate"
-          value={metrics ? `${metrics.cache_hit_rate.toFixed(1)}%` : '—'}
-          accent="#fbbf24"
-        />
+        <Kpi label="Total Requests"  value={metrics?.total_requests ?? '—'} accent="#60a5fa" />
+        <Kpi label="Allowed"         value={metrics?.allowed ?? '—'}         accent="#34d399" />
+        <Kpi label="Denied (429)"    value={metrics?.denied ?? '—'}          accent="#f87171" />
+        <Kpi label="Cache Hit Rate"  value={metrics ? `${metrics.cache_hit_rate.toFixed(1)}%` : '—'} accent="#fbbf24" />
       </div>
 
-      <div style={styles.chartCard}>
-        <div style={styles.chartTitle}>Requests per second (last 60s)</div>
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={history}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-            <XAxis dataKey="t" stroke="#9ca3af" tick={{ fontSize: 10 }} />
-            <YAxis stroke="#9ca3af" tick={{ fontSize: 11 }} />
-            <Tooltip
-              contentStyle={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6 }}
-              labelStyle={{ color: '#9ca3af' }}
-            />
-            <Line type="monotone" dataKey="allowed" stroke="#34d399" strokeWidth={2} dot={false} isAnimationActive={false} />
-            <Line type="monotone" dataKey="denied" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
-          </LineChart>
-        </ResponsiveContainer>
+      {/* LOAD TEST + CHART side by side */}
+      <div style={styles.twoCol}>
+        <div style={styles.card}>
+          <div style={styles.cardTitle}>LOAD TEST</div>
+          <div style={styles.formGrid}>
+            <Field label="Algorithm">
+              <select value={algorithm} onChange={e=>setAlgorithm(e.target.value)} style={styles.input}>
+                <option value="fixed">Fixed Window</option>
+                <option value="slog">Sliding Window Log</option>
+                <option value="swc">Sliding Window Counter</option>
+                <option value="bucket">Token Bucket</option>
+              </select>
+            </Field>
+            <Field label="Requests">
+              <input type="number" value={requests} onChange={e=>setRequests(e.target.value)} style={styles.input} min="1" max="50000" />
+            </Field>
+            <Field label="Concurrency">
+              <input type="number" value={concurrency} onChange={e=>setConcurrency(e.target.value)} style={styles.input} min="1" max="200" />
+            </Field>
+            {algorithm === 'bucket' ? (
+              <>
+                <Field label="Capacity"><input type="number" value={capacity} onChange={e=>setCapacity(e.target.value)} style={styles.input} /></Field>
+                <Field label="Refill/sec"><input type="number" value={refill} onChange={e=>setRefill(e.target.value)} style={styles.input} step="0.1" /></Field>
+              </>
+            ) : (
+              <>
+                <Field label="Limit"><input type="number" value={limit} onChange={e=>setLimit(e.target.value)} style={styles.input} /></Field>
+                <Field label="Window (s)"><input type="number" value={window_} onChange={e=>setWindow_(e.target.value)} style={styles.input} /></Field>
+              </>
+            )}
+          </div>
+          <button onClick={runLoadTest} disabled={running} style={styles.button}>
+            {running ? 'RUNNING…' : '▶ RUN TEST'}
+          </button>
+
+          {lastResult && (
+            <div style={styles.resultBox}>
+              {lastResult.error ? (
+                <div style={{color:'#f87171'}}>Error: {lastResult.error}</div>
+              ) : (
+                <>
+                  <ResultRow label="Sent"     value={lastResult.sent} />
+                  <ResultRow label="Allowed"  value={lastResult.allowed} color="#34d399" />
+                  <ResultRow label="Denied"   value={lastResult.denied}  color="#f87171" />
+                  <ResultRow label="Errors"   value={lastResult.errors} />
+                  <ResultRow label="Duration" value={`${lastResult.duration_ms} ms`} />
+                  <ResultRow label="RPS"      value={lastResult.rps.toFixed(0)} color="#fbbf24" big />
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.cardTitle}>REQUESTS PER SECOND (last 60s)</div>
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={history}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+              <XAxis dataKey="t" stroke="#9ca3af" tick={{ fontSize: 10 }} />
+              <YAxis stroke="#9ca3af" tick={{ fontSize: 11 }} />
+              <Tooltip contentStyle={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6 }} />
+              <Line type="monotone" dataKey="allowed" stroke="#34d399" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="denied"  stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
       </div>
+
+      {/* PER-ALGORITHM BREAKDOWN */}
+      {perAlgoData.length > 0 && (
+        <div style={{...styles.card, marginTop: 16}}>
+          <div style={styles.cardTitle}>ALGORITHM COMPARISON</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <BarChart data={perAlgoData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+              <XAxis dataKey="algorithm" stroke="#9ca3af" tick={{ fontSize: 11 }} />
+              <YAxis stroke="#9ca3af" tick={{ fontSize: 11 }} />
+              <Tooltip contentStyle={{ background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6 }} />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
+              <Bar dataKey="allowed" stackId="a" fill="#34d399" />
+              <Bar dataKey="denied"  stackId="a" fill="#f87171" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       <div style={styles.footer}>
         avg RPS since startup: {metrics?.avg_rps?.toFixed(2) ?? '—'} · cache size: {metrics?.cache_size ?? '—'} entries
@@ -102,78 +224,50 @@ function Kpi({ label, value, accent }) {
   );
 }
 
+function Field({ label, children }) {
+  return (
+    <label style={styles.field}>
+      <div style={styles.fieldLabel}>{label}</div>
+      {children}
+    </label>
+  );
+}
+
+function ResultRow({ label, value, color, big }) {
+  return (
+    <div style={styles.resultRow}>
+      <span style={styles.resultLabel}>{label}</span>
+      <span style={{
+        ...styles.resultValue,
+        color: color || '#e5e7eb',
+        fontSize: big ? 22 : 14,
+        fontWeight: big ? 700 : 500,
+      }}>{value}</span>
+    </div>
+  );
+}
+
 const styles = {
-  page: {
-    minHeight: '100vh',
-    background: '#0b1220',
-    color: '#e5e7eb',
-    fontFamily: 'system-ui, -apple-system, sans-serif',
-    padding: 32,
-  },
-  header: {
-    marginBottom: 32,
-    borderBottom: '1px solid #1f2937',
-    paddingBottom: 16,
-  },
-  brand: {
-    fontSize: 24,
-    fontWeight: 800,
-    letterSpacing: 4,
-    color: '#60a5fa',
-  },
-  tagline: {
-    fontSize: 12,
-    color: '#9ca3af',
-    marginTop: 4,
-    letterSpacing: 1,
-  },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(4, 1fr)',
-    gap: 16,
-    marginBottom: 24,
-  },
-  kpi: {
-    background: '#111827',
-    border: '1px solid #1f2937',
-    borderRadius: 8,
-    padding: 20,
-  },
-  kpiLabel: {
-    fontSize: 11,
-    textTransform: 'uppercase',
-    letterSpacing: 1.5,
-    marginBottom: 8,
-  },
-  kpiValue: {
-    fontSize: 28,
-    fontWeight: 700,
-    color: '#e5e7eb',
-  },
-  chartCard: {
-    background: '#111827',
-    border: '1px solid #1f2937',
-    borderRadius: 8,
-    padding: 20,
-  },
-  chartTitle: {
-    fontSize: 13,
-    color: '#9ca3af',
-    marginBottom: 12,
-    letterSpacing: 1,
-  },
-  footer: {
-    marginTop: 24,
-    fontSize: 11,
-    color: '#6b7280',
-    textAlign: 'center',
-  },
-  error: {
-    background: '#7f1d1d',
-    color: '#fecaca',
-    padding: 12,
-    borderRadius: 6,
-    marginBottom: 16,
-    fontSize: 13,
-  },
+  page: { minHeight: '100vh', background: '#0b1220', color: '#e5e7eb', fontFamily: 'system-ui, -apple-system, sans-serif', padding: 32 },
+  header: { marginBottom: 24, borderBottom: '1px solid #1f2937', paddingBottom: 16 },
+  brand: { fontSize: 24, fontWeight: 800, letterSpacing: 4, color: '#60a5fa' },
+  tagline: { fontSize: 12, color: '#9ca3af', marginTop: 4, letterSpacing: 1 },
+  grid: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 16 },
+  twoCol: { display: 'grid', gridTemplateColumns: '380px 1fr', gap: 16 },
+  card: { background: '#111827', border: '1px solid #1f2937', borderRadius: 8, padding: 20 },
+  cardTitle: { fontSize: 12, color: '#9ca3af', marginBottom: 16, letterSpacing: 1.5, fontWeight: 600 },
+  kpi: { background: '#111827', border: '1px solid #1f2937', borderRadius: 8, padding: 20 },
+  kpiLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 8 },
+  kpiValue: { fontSize: 28, fontWeight: 700, color: '#e5e7eb' },
+  formGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 },
+  field: { display: 'block' },
+  fieldLabel: { fontSize: 10, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 },
+  input: { width: '100%', background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6, color: '#e5e7eb', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit' },
+  button: { width: '100%', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, padding: '10px', fontSize: 13, fontWeight: 600, letterSpacing: 1, cursor: 'pointer' },
+  resultBox: { marginTop: 16, padding: 12, background: '#0b1220', border: '1px solid #1f2937', borderRadius: 6 },
+  resultRow: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #1f2937' },
+  resultLabel: { fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 1 },
+  resultValue: { fontSize: 14, fontWeight: 500 },
+  footer: { marginTop: 24, fontSize: 11, color: '#6b7280', textAlign: 'center' },
+  error: { background: '#7f1d1d', color: '#fecaca', padding: 12, borderRadius: 6, marginBottom: 16, fontSize: 13 },
 };
