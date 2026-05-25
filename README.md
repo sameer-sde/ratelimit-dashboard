@@ -1,16 +1,46 @@
-# React + Vite
+# Rate Limiter Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + Vite dashboard for the
+[ratelimit](https://github.com/sameer-sde/ratelimit) backend. Provides:
 
-Currently, two official plugins are available:
+- **Live KPI cards** — Total / Allowed / Denied / Cache Hit Rate
+- **Real-time chart** — requests per second, polled every 1s
+- **Load Tester** — run controlled load against any of the four
+  algorithms from the browser
+- **Algorithm Comparison** — stacked bar chart of allows vs denies
+  per algorithm
+- **Key Inspector** — raw Redis state for any key across all four
+  algorithms, with live watch mode
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Running
 
-## React Compiler
+The dashboard expects the backend at `http://localhost:8080`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+# Start the backend first (in the ratelimit repo)
+docker compose up -d
+go run ./cmd/server
 
-## Expanding the ESLint configuration
+# Then the dashboard
+npm install
+npm run dev
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Dashboard opens on `http://localhost:5180`.
+
+## Stack
+
+- React 18 + Vite (HMR)
+- Recharts for the time-series chart
+- Vanilla CSS, dark theme
+- 1s polling against `/metrics`
+
+## Backend
+
+See [sameer-sde/ratelimit](https://github.com/sameer-sde/ratelimit) for
+the Go server, four algorithms, hash ring, LRU cache, and benchmarks.
+
+---
+
+Built as part of a learning project — distributed rate limiting in Go,
+benchmarked to 18,769 req/s at p95 16ms.
